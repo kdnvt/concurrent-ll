@@ -237,5 +237,6 @@ static struct two_ptr try_flag(node_t *prev, node_t *target)
         struct two_ptr tmp = search_from(target->key, prev, NEXTEQ);
         if (tmp.next != target)
             return (struct two_ptr){NULL, NULL};
+        prev = tmp.cur;
     }
 }
