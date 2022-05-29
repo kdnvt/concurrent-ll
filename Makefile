@@ -40,6 +40,7 @@ deps =
 LOCK_OBJS =
 LOCK_OBJS += src/lock/list.o
 LOCK_OBJS += src/main.o
+LOCK_OBJS += src/hp.o
 deps += $(LOCK_OBJS:%.o=%.o.d)
 
 $(OUT)/test-lock: $(LOCK_OBJS)
@@ -51,6 +52,7 @@ src/lock/%.o: src/lock/%.c
 LOCKFREE_OBJS =
 LOCKFREE_OBJS += src/lockfree/list.o
 LOCKFREE_OBJS += src/main.o
+LOCKFREE_OBJS += src/hp.o
 deps += $(LOCKFREE_OBJS:%.o=%.o.d)
 
 $(OUT)/test-lockfree: $(LOCKFREE_OBJS)
@@ -62,6 +64,7 @@ src/lockfree/%.o: src/lockfree/%.c
 LOCKFREE2_OBJS =
 LOCKFREE2_OBJS += src/lockfree2/list.o
 LOCKFREE2_OBJS += src/main.o
+LOCKFREE2_OBJS += src/hp.o
 deps += $(LOCKFREE2_OBJS:%.o=%.o.d)
 
 $(OUT)/test-lockfree2: $(LOCKFREE2_OBJS)
@@ -69,6 +72,9 @@ $(OUT)/test-lockfree2: $(LOCKFREE2_OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 src/lockfree2/%.o: src/lockfree2/%.c
 	$(CC) $(CFLAGS) -DLOCKFREE2 -o $@ -MMD -MF $@.d -c $<
+
+src/hp.o: src/hp.c
+	$(CC) $(CFLAGS) -o $@ -MMD -MF $@.d -c $<
 
 check: $(EXEC)
 	bash scripts/test_correctness.sh
