@@ -1,23 +1,35 @@
 #include "list.h"
 #include <limits.h>
+#include <stdalign.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+
+#include "hp.h"
+
+struct back_pack {
+    hp_addr_t addr;
+    hp_pr_t *pr;
+};
+
 struct node {
     int key;
-    struct node *back_link;
-    struct node *next;
+    alignas(8) struct back_pack *back_link;
+    alignas(8) struct node *next;
+    alignas(8) hp_addr_t next_addr;
 };
 
 struct list {
     struct node *head, *tail;
     uint32_t size;
+    hp_pr_t *pr;
 };
 
 struct two_ptr {
-    node_t *cur;
-    node_t *next;
+    hp_addr_t cur_addr;
+    hp_addr_t next_addr;
 };
 
 #define F_MARK 2
@@ -26,39 +38,47 @@ struct two_ptr {
 #define CUREQ 0
 #define NEXTEQ 1
 
-#define MARK(ptr) ((uintptr_t) ptr | F_MARK)
-#define UNMARK(ptr) ((uintptr_t) ptr & ~F_MARK)
-#define ISMARK(ptr) ((uintptr_t) ptr & F_MARK)
+#define MARK(ptr) ((uintptr_t) atomic_load(&(ptr)) | F_MARK)
+#define UNMARK(ptr) ((uintptr_t) atomic_load(&(ptr)) & ~F_MARK)
+#define ISMARK(ptr) ((uintptr_t) atomic_load(&(ptr)) & F_MARK)
 
-#define FLAG(ptr) ((uintptr_t) ptr | F_FLAG)
-#define UNFLAG(ptr) ((uintptr_t) ptr & ~F_FLAG)
-#define ISFLAG(ptr) ((uintptr_t) ptr & F_FLAG)
+#define FLAG(ptr) ((uintptr_t) atomic_load(&(ptr)) | F_FLAG)
+#define UNFLAG(ptr) ((uintptr_t) atomic_load(&(ptr)) & ~F_FLAG)
+#define ISFLAG(ptr) ((uintptr_t) atomic_load(&(ptr)) & F_FLAG)
 
-#define ptrof(ptr) ((node_t *) ((uintptr_t) ptr & ~F_MASK))
+#define ptrof(ptr) ((node_t *) ((uintptr_t) atomic_load(&(ptr)) & ~F_MASK))
 
-node_t *search(list_t *list, int key);
+hp_addr_t search(list_t *list, int key);
 
-node_t *remove_node(list_t *list, int key);
+hp_addr_t remove_node(list_t *list, int key, hp_pr_t *pr);
 
-node_t *insert(list_t *list, int key);
+node_t *insert(list_t *list, int key, hp_pr_t *pr);
 
-static struct two_ptr search_from(int key, node_t *curr_node, int cur_or_next);
+static struct two_ptr search_from(int key,
+                                  hp_addr_t curr_node,
+                                  int cur_or_next,
+                                  hp_pr_t *pr);
 
 static void help_marked(node_t *prev, node_t *del);
 
-static void help_flag(node_t *prev, node_t *del);
+static void help_flag(node_t *prev, node_t *del, hp_pr_t *pr);
 
-static void try_mark(node_t *del);
+static void try_mark(node_t *del, hp_pr_t *pr);
 
-static struct two_ptr try_flag(node_t *prev, node_t *target);
+static struct two_ptr try_flag(hp_addr_t prev, node_t *target, hp_pr_t *pr);
 
 static node_t *new_node(int key);
+
+void node_free(void *arg);
 
 /* return true if value already in the list */
 bool list_contains(list_t *list, val_t val)
 {
-    if (search(list, val))
+    hp_addr_t res_addr = search(list, val);
+    if (res_addr) {
+        hp_pr_release(list->pr, res_addr);
         return true;
+    }
     return false;
 }
 /* insert a new node with the given value val in the list.
@@ -66,8 +86,9 @@ bool list_contains(list_t *list, val_t val)
  */
 bool list_add(list_t *list, val_t val)
 {
-    if (insert(list, val))
+    if (insert(list, val, list->pr)) {
         return true;
+    }
     return false;
 }
 
@@ -76,9 +97,33 @@ bool list_add(list_t *list, val_t val)
  */
 bool list_remove(list_t *list, val_t val)
 {
-    if (remove_node(list, val))
+    hp_t *hp = hp_init(list->pr, node_free);
+    hp_addr_t res = remove_node(list, val, list->pr);
+    if (res) {
+        node_t *res_node = *res;
+
+        hp_pr_release(list->pr, res);
+        if (res_node)
+            hp_retired(hp, res_node);
+
+        while (hp_scan(hp))
+            ;
+        free(hp);
         return true;
+    }
+    while (hp_scan(hp))
+        ;
+    free(hp);
     return false;
+}
+
+void node_free(void *arg)
+{
+    node_t *ptr = arg;
+    hp_pr_release(ptr->back_link->pr, ptr->back_link->addr);
+    hp_pr_release(ptr->back_link->pr, ptr->next_addr);
+    free(ptr->back_link);
+    free(ptr);
 }
 
 int list_size(list_t *list)
@@ -96,67 +141,99 @@ list_t *list_new()
     the_list->tail = new_node(INT_MAX);
     the_list->head->next = the_list->tail;
     the_list->size = 0;
+    the_list->pr = hp_pr_init();
     return the_list;
 }
 
 /* return the node with key if it exists, NULL otherwise. */
-node_t *search(list_t *list, int key)
+hp_addr_t search(list_t *list, int key)
 {
-    node_t *cur = search_from(key, list->head, CUREQ).cur;
-    if (cur->key == key)
-        return cur;
+    hp_addr_t head_addr = hp_pr_load_mask(list->pr, &list->head, F_MASK);
+    struct two_ptr res = search_from(key, head_addr, CUREQ, list->pr);
+    hp_pr_release(list->pr, res.next_addr);
+    if (((node_t *) (*res.cur_addr))->key == key) {
+        return res.cur_addr;
+    }
+    hp_pr_release(list->pr, res.cur_addr);
     return NULL;
 }
 
 /* return true if the node with key is removed successfully.
    return NULL if the node doesn't exist,
    or the node is already removed by others. */
-node_t *remove_node(list_t *list, int key)
+hp_addr_t remove_node(list_t *list, int key, hp_pr_t *pr)
 {
-    struct two_ptr pos = search_from(key, list->head, NEXTEQ);
-    node_t *del_node = pos.next;
-    if (del_node->key != key)
+    hp_addr_t head_addr = hp_pr_load_mask(pr, &list->head, F_MASK);
+    struct two_ptr pos = search_from(key, head_addr, NEXTEQ, pr);
+
+    hp_addr_t del_addr = pos.next_addr;
+    node_t *del_node = *del_addr;
+    if (del_node->key != key) {
+        hp_pr_release(pr, pos.cur_addr);
+        hp_pr_release(pr, del_addr);
         return NULL;
-    pos = try_flag(pos.cur, del_node);
-    if (pos.cur) {
-        help_flag(pos.cur, del_node);
     }
-    if (!pos.next)
+    pos = try_flag(pos.cur_addr, del_node,
+                   pr);  // only pos.cur_addr should be release
+    if (pos.cur_addr) {
+        help_flag(*pos.cur_addr, del_node, pr);
+        hp_pr_release(pr, pos.cur_addr);
+    }
+    if (!pos.next_addr) {
+        hp_pr_release(pr, del_addr);
         return NULL;
+    }
     atomic_fetch_sub(&list->size, 1);
-    return del_node;
+    return del_addr;
 }
+
 
 /*  Return true if the node is inserted in list successfully.
     Return NULL if there is already a node with such key. */
-node_t *insert(list_t *list, int key)
+node_t *insert(list_t *list, int key, hp_pr_t *pr)
 {
-    struct two_ptr pos = search_from(key, list->head, CUREQ);
-    if (pos.cur->key == key) {
+    hp_addr_t head_addr = hp_pr_load_mask(pr, &list->head, F_MASK);
+    struct two_ptr pos = search_from(key, head_addr, CUREQ, pr);
+
+    if (((node_t *) (*pos.cur_addr))->key == key) {
+        hp_pr_release(pr, pos.cur_addr);
+        hp_pr_release(pr, pos.next_addr);
         return NULL;
     }
     node_t *tmp = new_node(key);
     while (1) {
-        node_t *prev_succ = pos.cur->next;
+        node_t *prev_succ = atomic_load(&((node_t *) (*pos.cur_addr))->next);
         if (ISFLAG(prev_succ)) {
-            help_flag(pos.cur, ptrof(prev_succ));
+            help_flag(((node_t *) (*pos.cur_addr)), ptrof(prev_succ), pr);
         } else {
-            tmp->next = ptrof(pos.next);
-            node_t *next_node = pos.next;
-            if (atomic_compare_exchange_strong(&pos.cur->next, &next_node,
-                                               tmp)) {
+            tmp->next = *pos.next_addr;
+            node_t *next_node = *pos.next_addr;
+            if (atomic_compare_exchange_strong(
+                    &((node_t *) (*pos.cur_addr))->next, &next_node, tmp)) {
                 atomic_fetch_add(&list->size, 1);
-
+                hp_pr_release(pr, pos.cur_addr);
+                hp_pr_release(pr, pos.next_addr);
                 return tmp;
             } else {
-                if (next_node == (node_t *) FLAG(pos.cur->next))
-                    help_flag(pos.cur, ptrof(next_node));
-                while (ISMARK(pos.cur->next))
-                    pos.cur = pos.cur->back_link;
+                if (next_node ==
+                    (node_t *) FLAG(((node_t *) (*pos.cur_addr))->next))
+                    help_flag(((node_t *) (*pos.cur_addr)), ptrof(next_node),
+                              pr);
+                while (ISMARK(((node_t *) (*pos.cur_addr))->next)) {
+                    hp_addr_t tmp_addr = pos.cur_addr;
+                    pos.cur_addr = hp_pr_load_mask(
+                        pr,
+                        (void *) ((node_t *) (*pos.cur_addr))->back_link->addr,
+                        F_MASK);
+                    hp_pr_release(pr, tmp_addr);
+                }
             }
         }
-        pos = search_from(key, pos.cur, CUREQ);
-        if (pos.cur->key == key) {
+        hp_pr_release(pr, pos.next_addr);
+        pos = search_from(key, pos.cur_addr, CUREQ, pr);
+        if (((node_t *) (*pos.cur_addr))->key == key) {
+            hp_pr_release(pr, pos.cur_addr);
+            hp_pr_release(pr, pos.next_addr);
             free(tmp);
             return NULL;
         }
@@ -170,73 +247,114 @@ static node_t *new_node(int key)
     return cur;
 }
 
-static struct two_ptr search_from(int key, node_t *curr_node, int cur_or_next)
+static struct two_ptr search_from(int key,
+                                  hp_addr_t curr_addr,
+                                  int cur_or_next,
+                                  hp_pr_t *pr)
 {
-    node_t *next_node = ptrof(curr_node->next);
-    while ((!cur_or_next && next_node->key <= key) ||
-           (cur_or_next && next_node->key < key)) {
-        while (
-            ISMARK(next_node->next) &&
-            (!ISMARK(curr_node->next) || ptrof(curr_node->next) != next_node)) {
-            if (ptrof(curr_node->next) == next_node)
-                help_marked(curr_node, next_node);
-
-            next_node = ptrof(curr_node->next);
+    hp_addr_t next_addr =
+        hp_pr_load_mask(pr, &((node_t *) (*curr_addr))->next, F_MASK);
+    while ((!cur_or_next && ((node_t *) (*next_addr))->key <= key) ||
+           (cur_or_next && ((node_t *) (*next_addr))->key < key)) {
+        while (ISMARK(((node_t *) (*next_addr))->next) &&
+               (!ISMARK(((node_t *) (*curr_addr))->next) ||
+                ptrof(((node_t *) (*curr_addr))->next) !=
+                    ((node_t *) (*next_addr)))) {
+            if (ptrof(((node_t *) (*curr_addr))->next) ==
+                ((node_t *) (*next_addr))) {
+                help_marked(((node_t *) (*curr_addr)),
+                            ((node_t *) (*next_addr)));
+            }
+            hp_addr_t tmp = next_addr;
+            next_addr =
+                hp_pr_load_mask(pr, &((node_t *) (*curr_addr))->next, F_MASK);
+            hp_pr_release(pr, tmp);
         }
-        if ((!cur_or_next && next_node->key <= key) ||
-            (cur_or_next && next_node->key < key)) {
-            curr_node = next_node;
-            next_node = ptrof(curr_node->next);
+        if ((!cur_or_next && ((node_t *) (*next_addr))->key <= key) ||
+            (cur_or_next && ((node_t *) (*next_addr))->key < key)) {
+            hp_addr_t tmp = curr_addr;
+            curr_addr = next_addr;
+
+            next_addr = hp_pr_load_mask(pr, &((node_t *) (*next_addr))->next,
+                                        F_MASK);  // curr_node -> next_node
+            hp_pr_release(pr, tmp);
         }
     }
-
-    return (struct two_ptr){curr_node, next_node};
+    return (struct two_ptr){curr_addr, next_addr};
 }
 
 static void help_marked(node_t *prev, node_t *del)
 {
-    node_t *next_node = del->next;
-    del = (node_t *) FLAG(del);
-    if (atomic_compare_exchange_strong(&prev->next, &del, (ptrof(next_node))))
-        ;
+    hp_addr_t tmp = hp_pr_load_mask(del->back_link->pr, &del->next, F_MASK);
+    node_t *next_node = *tmp;
+    node_t *exp_del = (node_t *) FLAG(del);
+    if (atomic_compare_exchange_strong(&prev->next, &exp_del,
+                                       (ptrof(next_node)))) {
+        del->next_addr = tmp;
+    } else {
+        hp_pr_release(ptrof(del)->back_link->pr, tmp);
+    }
 }
 
-static void help_flag(node_t *prev, node_t *del)
+static void help_flag(node_t *prev, node_t *del, hp_pr_t *pr)
 {
-    del->back_link = prev;
+    struct back_pack *back = malloc(sizeof(*back));
+    back->addr = hp_pr_load_mask(pr, &prev, F_MASK);
+    back->pr = pr;
+    void *exp = NULL;
+    if (!atomic_compare_exchange_strong(&del->back_link, &exp, back)) {
+        hp_pr_release(pr, back->addr);
+        free(back);
+    }
     if (!ISMARK(del->next))
-        try_mark(del);
+        try_mark(del, pr);
     help_marked(prev, del);
 }
 
-static void try_mark(node_t *del)
+static void try_mark(node_t *del, hp_pr_t *pr)
 {
     do {
-        node_t *next_node = ptrof(del->next);
+        hp_addr_t next_addr = hp_pr_load_mask(pr, &del->next, F_MASK);
+        node_t *next_node = *next_addr;
         atomic_compare_exchange_weak(&del->next, &next_node,
                                      (node_t *) MARK(next_node));
-        if (ISFLAG(next_node))
-            help_flag(del, (node_t *) ptrof(next_node));
+        if (ISFLAG(next_node) && *next_addr == ptrof(next_node))
+            help_flag(del, *next_addr, pr);
+        hp_pr_release(pr, next_addr);
     } while (!ISMARK(del->next));
 }
 
-static struct two_ptr try_flag(node_t *prev, node_t *target)
+static struct two_ptr try_flag(hp_addr_t prev_addr, node_t *target, hp_pr_t *pr)
 {
+    node_t *prev = *prev_addr;
     while (1) {
-        if (prev->next == (node_t *) FLAG(target))
-            return (struct two_ptr){prev, NULL};
+        if (atomic_load(&prev->next) == (node_t *) FLAG(target))
+            return (struct two_ptr){prev_addr, NULL};
         node_t *expect = target;
         atomic_compare_exchange_strong(&prev->next, &expect,
                                        (node_t *) FLAG(target));
         if (expect == target)
-            return (struct two_ptr){prev, (node_t *) 1};
+            return (struct two_ptr){prev_addr, (hp_addr_t) 1};
         if (expect == (node_t *) FLAG(target))
-            return (struct two_ptr){prev, NULL};
-        while (ISMARK(prev->next))
-            prev = prev->back_link;
-        struct two_ptr tmp = search_from(target->key, prev, NEXTEQ);
-        if (tmp.next != target)
+            return (struct two_ptr){prev_addr, NULL};
+        while (ISMARK(prev->next)) {
+            hp_addr_t tmp = prev_addr;
+            prev_addr =
+                hp_pr_load_mask(pr, (void *) (prev->back_link->addr), F_MASK);
+            hp_pr_release(pr, tmp);
+            prev = *prev_addr;
+        }
+        // search_from will deal with the prev_addr. We only need to deal
+        // with the hp_addr_t return to tmp.
+        struct two_ptr tmp = search_from(target->key, prev_addr, NEXTEQ, pr);
+
+        if (((node_t *) (*tmp.next_addr)) != target) {
+            hp_pr_release(pr, tmp.next_addr);
+            hp_pr_release(pr, tmp.cur_addr);
             return (struct two_ptr){NULL, NULL};
-        prev = tmp.cur;
+        }
+        hp_pr_release(pr, tmp.next_addr);
+        prev_addr = tmp.cur_addr;
+        prev = *prev_addr;
     }
 }
