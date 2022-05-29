@@ -132,6 +132,7 @@ void *test(void *data)
         }
         d->n_ops++;
     }
+    free(seeds);
     return NULL;
 }
 
