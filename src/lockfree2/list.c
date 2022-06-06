@@ -6,8 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-
-#include "hp.h"
+ 
 
 struct back_pack {
     hp_addr_t addr;
@@ -68,11 +67,15 @@ static void try_mark(node_t *del, hp_pr_t *pr);
 static struct two_ptr try_flag(hp_addr_t prev, node_t *target, hp_pr_t *pr);
 
 static node_t *new_node(int key);
+ 
 
-void node_free(void *arg);
+hp_pr_t *list_pr(list_t *list){
+    return list->pr;
+}
+
 
 /* return true if value already in the list */
-bool list_contains(list_t *list, val_t val)
+bool list_contains(list_t *list, val_t val,hp_t *hp)
 {
     hp_addr_t res_addr = search(list, val);
     if (res_addr) {
@@ -84,7 +87,7 @@ bool list_contains(list_t *list, val_t val)
 /* insert a new node with the given value val in the list.
  * @return true if succeed
  */
-bool list_add(list_t *list, val_t val)
+bool list_add(list_t *list, val_t val,hp_t *hp)
 {
     if (insert(list, val, list->pr)) {
         return true;
@@ -95,9 +98,9 @@ bool list_add(list_t *list, val_t val)
 /* delete a node with the given value val (if the value is present).
  * @return true if succeed
  */
-bool list_remove(list_t *list, val_t val)
+bool list_remove(list_t *list, val_t val,hp_t *hp)
 {
-    hp_t *hp = hp_init(list->pr, node_free);
+     
     hp_addr_t res = remove_node(list, val, list->pr);
     if (res) {
         node_t *res_node = *res;
@@ -106,14 +109,10 @@ bool list_remove(list_t *list, val_t val)
         if (res_node)
             hp_retired(hp, res_node);
 
-        while (hp_scan(hp))
-            ;
-        free(hp);
+         
         return true;
     }
-    while (hp_scan(hp))
-        ;
-    free(hp);
+     
     return false;
 }
 

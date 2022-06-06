@@ -13,7 +13,16 @@ struct node {
 struct list {
     node_t *head, *tail;
     uint32_t size;
+    hp_pr_t *pr;
 };
+
+hp_pr_t *list_pr(list_t *list){
+    return list->pr;
+}
+
+void node_free(void *arg)
+{ 
+}
 
 /* The following functions handle the low-order mark bit that indicates
  * whether a node is logically deleted (1) or not (0).
@@ -77,7 +86,7 @@ static node_t *list_search(list_t *set, val_t val, node_t **left_node)
 }
 
 /* return true if there is a node in the list owning value val. */
-bool list_contains(list_t *the_list, val_t val)
+bool list_contains(list_t *the_list, val_t val,hp_t *hp)
 {
     node_t *iterator = get_unmarked_ref(the_list->head->next);
     while (iterator != the_list->tail) {
@@ -123,7 +132,7 @@ int list_size(list_t *the_list)
     return the_list->size;
 }
 
-bool list_add(list_t *the_list, val_t val)
+bool list_add(list_t *the_list, val_t val,hp_t *hp)
 {
     node_t *left = NULL;
     node_t *new_elem = new_node(val, NULL);
@@ -141,7 +150,7 @@ bool list_add(list_t *the_list, val_t val)
 }
 
 /* The deletion is logical and consists of setting the node mark bit to 1. */
-bool list_remove(list_t *the_list, val_t val)
+bool list_remove(list_t *the_list, val_t val,hp_t *hp)
 {
     node_t *left = NULL;
     while (1) {

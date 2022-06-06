@@ -21,7 +21,7 @@
 #define DEFAULT_NUM_THREADS 1
 
 /* default experiment duration in miliseconds */
-#define DEFAULT_DURATION 1000
+#define DEFAULT_DURATION 20000
 
 /* the maximum value the key stored in the list can take; defines key range */
 #define DEFAULT_RANGE 2048
@@ -83,7 +83,19 @@ typedef ALIGNED(64) struct thread_data {
 
 void *test(void *data)
 {
+    hp_t *hp = hp_init(list_pr(the_list),node_free);
     thread_data_t *d = (thread_data_t *) data; /* per-thread data */
+
+    int cpu_id = d->id; 
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(cpu_id, &cpuset);
+
+    pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+
+
+
+
     /* scale percentages of the various operations to the range 0..255.
      * this saves us a floating point operation during the benchmark
      * e.g instead of random()%100 to determine the next operation we will do,
@@ -106,7 +118,7 @@ void *test(void *data)
         /* we make sure the insert was effective (as opposed to just updating an
          * existing entry).
          */
-        if (list_add(the_list, the_value) == 0)
+        if (list_add(the_list, the_value, hp) == 0)
             i--;
     }
 
@@ -118,14 +130,14 @@ void *test(void *data)
         /* generate the operation */
         uint32_t op = my_random(&seeds[0], &seeds[1], &seeds[2]) & 0xff;
         if (op < read_thresh) { /* do a find operation */
-            list_contains(the_list, the_value);
+            list_contains(the_list, the_value,hp);
         } else if (last == -1) { /* do a write operation */
-            if (list_add(the_list, the_value)) {
+            if (list_add(the_list, the_value,hp)) {
                 d->n_insert++;
                 last = 1;
             }
         } else {
-            if (list_remove(the_list, the_value)) { /* do a delete operation */
+            if (list_remove(the_list, the_value,hp)) { /* do a delete operation */
                 d->n_remove++;
                 last = -1;
             }
@@ -133,6 +145,10 @@ void *test(void *data)
         d->n_ops++;
     }
     free(seeds);
+    while(hp_scan(hp));
+
+    free(hp);
+
     return NULL;
 }
 

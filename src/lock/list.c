@@ -8,9 +8,18 @@ struct node {
 
 struct list {
     node_t *head;
+    hp_pr_t *pr;
 };
 
-bool list_contains(list_t *the_list, val_t val)
+hp_pr_t *list_pr(list_t *list){
+    return list->pr;
+}
+
+void node_free(void *arg)
+{ 
+}
+
+bool list_contains(list_t *the_list, val_t val,hp_t *hp)
 {
     /* lock sentinel node */
     node_t *elem = the_list->head;
@@ -132,7 +141,7 @@ int list_size(list_t *the_list)
     return size;
 }
 
-bool list_add(list_t *the_list, val_t val)
+bool list_add(list_t *the_list, val_t val,hp_t *hp)
 {
     /* lock sentinel node */
     node_t *elem = the_list->head;
@@ -172,7 +181,7 @@ bool list_add(list_t *the_list, val_t val)
     return true;
 }
 
-bool list_remove(list_t *the_list, val_t val)
+bool list_remove(list_t *the_list, val_t val,hp_t *hp)
 {
     /* lock sentinel node */
     node_t *prev = the_list->head;
